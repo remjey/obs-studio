@@ -21,6 +21,12 @@ along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #include <obs.h>
 #include <util/threading.h>
 
+struct jack_ring_buffer_item {
+	jack_default_audio_sample_t **buffer;
+	jack_nframes_t nframes;
+	jack_time_t timestamp;
+};
+
 struct jack_data {
 	obs_source_t *source;
 
@@ -31,13 +37,23 @@ struct jack_data {
 
 	/* server info */
 	enum speaker_layout speakers;
-	uint_fast32_t samples_per_sec;
-	uint_fast32_t bytes_per_frame;
 
+	/* JACK handles and status */
 	jack_client_t *jack_client;
 	jack_port_t **jack_ports;
+	volatile bool activated;
 
-	pthread_mutex_t jack_mutex;
+	/* ring buffer */
+	struct jack_ring_buffer_item *rb;
+	pthread_mutex_t rb_mutex;
+	jack_nframes_t rb_buffer_size;
+	size_t rb_items;
+	volatile long rb_read;
+	volatile long rb_write;
+
+	/* transfer thread */
+	pthread_t transfer_thread;
+	bool transfer_thread_started;
 };
 
 /**

@@ -42,7 +42,7 @@ static void jack_destroy(void *vptr)
 
 	if (data->device)
 		bfree(data->device);
-	pthread_mutex_destroy(&data->jack_mutex);
+	pthread_mutex_destroy(&data->rb_mutex);
 	bfree(data);
 }
 
@@ -98,9 +98,13 @@ static void *jack_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct jack_data *data = bzalloc(sizeof(struct jack_data));
 
-	pthread_mutex_init(&data->jack_mutex, NULL);
+	pthread_mutex_init(&data->rb_mutex, NULL);
+
 	data->source = source;
 	data->channels = -1;
+	data->activated = false;
+	data->transfer_thread_started = false;
+	data->rb = NULL;
 
 	jack_update(data, settings);
 
