@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <inttypes.h>
+#include <math.h>
 
 #include <util/circlebuf.h>
 #include <obs-module.h>
@@ -83,6 +84,10 @@ struct noise_suppress_data {
 	/* Resampler */
 	audio_resampler_t *rnn_resampler;
 	audio_resampler_t *rnn_resampler_back;
+
+	/* Buffers for dry mix */
+	float *rnn_dry_mix_buffers[MAX_PREPROC_CHANNELS];
+	int rnn_dry_mix_buffers_switch;
 #endif
 
 	/* PCM buffers */
@@ -125,6 +130,7 @@ static void noise_suppress_destroy(void *data)
 #endif
 #ifdef LIBRNNOISE_ENABLED
 		rnnoise_destroy(ng->rnn_states[i]);
+		bfree(ng->rnn_dry_mix_buffers[i]);
 #endif
 		circlebuf_free(&ng->input_buffers[i]);
 		circlebuf_free(&ng->output_buffers[i]);
@@ -158,6 +164,8 @@ static inline void alloc_channel(struct noise_suppress_data *ng,
 #endif
 #ifdef LIBRNNOISE_ENABLED
 	ng->rnn_states[channel] = rnnoise_create(NULL);
+	ng->rnn_dry_mix_buffers[channel] =
+		bzalloc(sizeof(float) * RNNOISE_FRAME_SIZE * 2);
 #endif
 	circlebuf_reserve(&ng->input_buffers[channel], frames * sizeof(float));
 	circlebuf_reserve(&ng->output_buffers[channel], frames * sizeof(float));
@@ -338,11 +346,39 @@ static inline void process_rnnoise(struct noise_suppress_data *ng)
 		}
 	}
 
+	/* Copy current dry buffer to the dry mix buffer */
+	size_t dry_mix_buf_base =
+		RNNOISE_FRAME_SIZE * ng->rnn_dry_mix_buffers_switch;
+
+	for (size_t i = 0; i < ng->channels; i++) {
+		memcpy(ng->rnn_dry_mix_buffers[i] + dry_mix_buf_base,
+		       ng->rnn_segment_buffers[i],
+		       sizeof(float) * RNNOISE_FRAME_SIZE);
+	}
+
+	/* Switch to the other half of the dry mix buffer, which is the
+	 * previous dry buffer, because RNNoise outputs sound with a latency
+	 * of one buffer */
+	ng->rnn_dry_mix_buffers_switch ^= 1;
+	dry_mix_buf_base = RNNOISE_FRAME_SIZE * ng->rnn_dry_mix_buffers_switch;
+
+	/* Compute the coefficients for the mix */
+	float mix_dry = 1.0f / exp2f(-ng->suppress_level / 6.0f);
+	float mix_wet = 1.0f - mix_dry;
+
 	/* Execute */
 	for (size_t i = 0; i < ng->channels; i++) {
 		rnnoise_process_frame(ng->rnn_states[i],
 				      ng->rnn_segment_buffers[i],
 				      ng->rnn_segment_buffers[i]);
+
+		/* Mix in the previous buffer */
+		for (size_t s = 0; s < RNNOISE_FRAME_SIZE; ++s) {
+			ng->rnn_segment_buffers[i][s] =
+				ng->rnn_segment_buffers[i][s] * mix_wet +
+				ng->rnn_dry_mix_buffers[i][dry_mix_buf_base + s] *
+					mix_dry;
+		}
 	}
 
 	/* Revert signal level adjustment, resample back if necessary */
@@ -496,21 +532,6 @@ noise_suppress_filter_audio(void *data, struct obs_audio_data *audio)
 	return &ng->output_audio;
 }
 
-static bool noise_suppress_method_modified(obs_properties_t *props,
-					   obs_property_t *property,
-					   obs_data_t *settings)
-{
-	obs_property_t *p_suppress_level =
-		obs_properties_get(props, S_SUPPRESS_LEVEL);
-	const char *method = obs_data_get_string(settings, S_METHOD);
-	bool enable_level = strcmp(method, S_METHOD_SPEEX) == 0;
-
-	obs_property_set_visible(p_suppress_level, enable_level);
-
-	UNUSED_PARAMETER(property);
-	return true;
-}
-
 static void noise_suppress_defaults_v1(obs_data_t *s)
 {
 	obs_data_set_default_int(s, S_SUPPRESS_LEVEL, -30);
@@ -541,17 +562,12 @@ static obs_properties_t *noise_suppress_properties(void *data)
 		OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(method, TEXT_METHOD_SPEEX, S_METHOD_SPEEX);
 	obs_property_list_add_string(method, TEXT_METHOD_RNN, S_METHOD_RNN);
-
-	obs_property_set_modified_callback(method,
-					   noise_suppress_method_modified);
 #endif
 
-#ifdef LIBSPEEXDSP_ENABLED
 	obs_property_t *speex_slider = obs_properties_add_int_slider(
 		ppts, S_SUPPRESS_LEVEL, TEXT_SUPPRESS_LEVEL, SUP_MIN, SUP_MAX,
 		1);
 	obs_property_int_set_suffix(speex_slider, " dB");
-#endif
 
 	UNUSED_PARAMETER(data);
 	return ppts;
