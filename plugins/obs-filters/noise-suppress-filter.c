@@ -212,7 +212,14 @@ static void noise_suppress_update(void *data, obs_data_t *s)
 	ng->rnnoise_dry_mix_ratio =
 		obs_data_get_int(s, S_RNNOISE_DRY_MIX_LEVEL) / 100.0f;
 	ng->latency = 1000000000LL / (1000 / BUFFER_SIZE_MSEC);
+
+#if !defined(LIBSPEEXDSP_ENABLED)
+	ng->use_rnnoise = true;
+#elif !defined(LIBRNNOISE_ENABLED)
+	ng->use_rnnoise = false;
+#else
 	ng->use_rnnoise = strcmp(method, S_METHOD_RNN) == 0;
+#endif
 
 	/* Process 10 millisecond segments to keep latency low */
 	/* Also RNNoise only supports buffers of this exact size. */
@@ -318,6 +325,7 @@ static inline void process_speexdsp(struct noise_suppress_data *ng)
 #endif
 }
 
+#ifdef LIBRNNOISE_ENABLED
 static inline bool rnnoise_dry_mix_enabled(struct noise_suppress_data *ng)
 {
 	return ng->rnnoise_dry_mix_ratio != 0.0f;
@@ -361,6 +369,7 @@ static inline void rnnoise_apply_dry_mix(struct noise_suppress_data *ng)
 		}
 	}
 }
+#endif
 
 static inline void process_rnnoise(struct noise_suppress_data *ng)
 {
@@ -613,6 +622,9 @@ static obs_properties_t *noise_suppress_properties(void *data)
 		OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(method, TEXT_METHOD_SPEEX, S_METHOD_SPEEX);
 	obs_property_list_add_string(method, TEXT_METHOD_RNN, S_METHOD_RNN);
+
+	obs_property_set_modified_callback(method,
+					   noise_suppress_method_modified);
 #endif
 
 #ifdef LIBSPEEXDSP_ENABLED
@@ -627,9 +639,6 @@ static obs_properties_t *noise_suppress_properties(void *data)
 		ppts, S_RNNOISE_DRY_MIX_LEVEL, TEXT_RNNOISE_DRY_MIX, 0, 100, 1);
 	obs_property_int_set_suffix(rnnoise_slider, " %");
 #endif
-
-	obs_property_set_modified_callback(method,
-					   noise_suppress_method_modified);
 
 	UNUSED_PARAMETER(data);
 	return ppts;
